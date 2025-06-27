@@ -40,6 +40,13 @@ async function showTasksByStatus(ctx, status) {
     if (!doer) return ctx.reply("❌ Not registered.");
 
     const whereClause = { doer: doer.name, status };
+
+    if (status === 'pending') {
+        whereClause.status = { [Op.or]: ['pending', 'revised'] };
+    } else {
+        whereClause.status = status;
+    }
+
     const tasks = await Task.findAll({
         where: whereClause,
         order: [['createdAt', 'DESC']],
@@ -134,7 +141,7 @@ bot.command('tasks', async (ctx) => {
                 [Markup.button.callback('⏳ Pending', 'TASKS_PENDING')],
                 [Markup.button.callback('✅ Completed', 'TASKS_COMPLETED')],
                 [Markup.button.callback('📝 Revised', 'TASKS_REVISED')],
-                [Markup.button.callback('❌ Canceled', 'TASKS_CANCELED')],
+                [Markup.button.callback('❌ Cancelled', 'TASKS_CANCELED')],
             ])
         }
     );
@@ -187,6 +194,8 @@ bot.action(/^TASK_DONE_(\d+)$/, async (ctx) => {
 
 const extensionSessions = {};
 bot.action(/^TASK_EXT_(\d+)$/, async (ctx) => {
+    const chatId = getChatId(ctx);
+    delete extensionSessions[chatId];
     await ctx.answerCbQuery();
     const taskId = parseInt(ctx.match[1]);
     extensionSessions[ctx.chat.id] = taskId;
@@ -271,6 +280,8 @@ bot.on('text', async (ctx, next) => {
 // Handles "Request Cancellation" button; asks doer to type reason, tracks using cancellationSessions[chatId]
 const cancellationSessions = {};
 bot.action(/^TASK_CANCEL_(\d+)$/, async (ctx) => {
+    const chatId = getChatId(ctx);
+    delete cancellationSessions[chatId];
     await ctx.answerCbQuery();
     const taskId = parseInt(ctx.match[1]);
     cancellationSessions[ctx.chat.id] = taskId;
@@ -318,7 +329,36 @@ bot.on('text', async (ctx, next) => {
 
 
 
-bot.command('cancel', async (ctx) => {
+// For EA only if she types /heybot she gets three buttons one to check cancel requests, other is to check extension requests and last it for task preview.
+bot.command('heybot', async (ctx) => {
+    const chatId = ctx.chat.id;
+    if (![ROLES.ea, ROLES.boss].includes(chatId)) {
+        return ctx.reply("❌ You are not authorized to access this menu.");
+    }
+    await ctx.reply(
+        "👩‍💼 *EA Control Panel* — Choose an action:",
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [
+                    Markup.button.callback('🚫 Cancel Requests', 'EA_CANCEL_REQ')
+                ],
+                [
+                    Markup.button.callback('🔁 Extension Requests', 'EA_EXT_REQ')
+                ],
+                [
+                    Markup.button.callback('📋 Task Preview', 'STATUS')
+                ]
+            ])
+        }
+    );
+});
+
+
+
+
+
+bot.action('EA_CANCEL_REQ', async (ctx) => {
     const chatId = ctx.chat.id;
 
     if (![ROLES.boss, ROLES.ea].includes(chatId)) {
@@ -404,7 +444,7 @@ bot.action(/^CANCEL_REJECT_(\d+)$/, async (ctx) => {
 
 
 // First, only EA and Boss can see the extension request and they get the option for APPROVE and REJECT 
-bot.command('extensions', async (ctx) => {
+bot.action('EA_EXT_REQ', async (ctx) => {
     const chatId = ctx.chat.id;
 
     if (![ROLES.boss, ROLES.ea].includes(chatId)) {
@@ -492,27 +532,35 @@ bot.action(/^EXT_REJECT_(\d+)$/, async (ctx) => {
 
 
 
-
-
-
-
 let taskSession = {};
+const broadcastSessions = {};
+const broadcastDraft = {}; // Stores the draft for each boss
+
+// Helper: Wipe any existing session for this user
+function clearSessions(chatId) {
+    delete taskSession[chatId];
+    delete broadcastSessions[chatId];
+    delete broadcastDraft[chatId];
+}
 
 // Utility to get consistent chat ID
 function getChatId(ctx) {
     return ctx.chat?.id || ctx.callbackQuery?.message?.chat?.id;
 }
 
-
+// 
 const showOptions = (ctx) => {
     ctx.reply('Hi Boss! What would you like to do?', Markup.inlineKeyboard([
         [Markup.button.callback('Assign Task', 'ASSIGN')],
-        [Markup.button.callback('Check Task Status', 'STATUS')]
+        [Markup.button.callback('Check Task Status', 'STATUS')],
+        [Markup.button.callback('📢 Broadcast Message', 'BROADCAST')]
     ]));
 };
 
 // START BOT
 bot.start((ctx) => {
+    const chatId = getChatId(ctx);
+    clearSessions(chatId);
     if (!isBoss(ctx)) return ctx.reply("❌ You are not authorized to use this bot.");
     showOptions(ctx);
 });
@@ -520,6 +568,8 @@ bot.start((ctx) => {
 
 // bot.hears(/^(hi|hello|hey|Hi|Hey|Hello)$/i, showOptions);
 bot.hears(/^(hi|hello|hey)$/i, (ctx) => {
+    const chatId = getChatId(ctx);
+    clearSessions(chatId);
     if (!isBoss(ctx)) return ctx.reply("❌ You are not authorized to use this bot.");
     showOptions(ctx);
 });
@@ -529,12 +579,15 @@ bot.hears(/^(hi|hello|hey)$/i, (ctx) => {
 
 // ASSIGN TASK - SELECT DOER
 bot.action('ASSIGN', async (ctx) => {
-    if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can assign tasks.");
     const chatId = getChatId(ctx);
-    taskSession[chatId] = {};
+    clearSessions(chatId); // Wipe any previous session!
+
+    if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can assign tasks.");
+    taskSession[chatId] = { step: 'choose_doer' };
 
     const doers = await Doer.findAll({ where: { isActive: true } });
     if (!doers.length) {
+        clearSessions(chatId);
         return ctx.reply("⚠️ No doers found in the database. Please add them.");
     }
     const buttons = doers.map(d => [Markup.button.callback(d.name, `DOER_${d.id}`)]);
@@ -543,33 +596,27 @@ bot.action('ASSIGN', async (ctx) => {
 });
 
 
-bot.action('STATUS', async (ctx) => {
-    if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can check task statuses.");
-
-    ctx.reply("📋 Select the task status you want to view:", Markup.inlineKeyboard([
-        [Markup.button.callback('📌 Pending', 'STATUS_PENDING')],
-        [Markup.button.callback('✅ Completed', 'STATUS_COMPLETED')],
-        [Markup.button.callback('🔁 Revised', 'STATUS_REVISED')]
-    ]));
-});
-
-
-
-
-
 // HANDLE DOER SELECTED
-
 bot.action(/DOER_(\d+)/, async (ctx) => {
+
     if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can assign tasks.");
 
     const chatId = getChatId(ctx);
+
+    // Step check
+    if (!taskSession[chatId] || taskSession[chatId].step !== 'choose_doer') {
+        clearSessions(chatId);
+        return ctx.reply("⚠️ Please start from the main menu to assign a task.");
+    }
+
     const doerId = parseInt(ctx.match[1]);
-    console.log("doerId:", doerId);
+    // console.log("doerId:", doerId);
     const doer = await Doer.findByPk(doerId);
 
     if (!doer) return ctx.reply("❌ Doer not found.");
 
     taskSession[chatId] = {
+        step: 'waiting_task', // <--- Next step is typing the task
         doerName: doer.name,
         doerId: doer.id,
         doerTelegramId: doer.telegramId
@@ -579,37 +626,86 @@ bot.action(/DOER_(\d+)/, async (ctx) => {
 });
 
 
-
-
-// HANDLE TEXT INPUT (TASK or DUE DATE)
-bot.on('text', async (ctx) => {
+// HANDLE TEXT INPUT (TASK )
+bot.on('text', async (ctx, next) => {
     if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can perform this action.");
 
     const chatId = getChatId(ctx);
     const session = taskSession[chatId];
-    if (!session) return;
 
-    // Case 1: Task input
-    if (!session.task) {
-        session.task = ctx.message.text;
+    if (!session || session.step !== 'waiting_task') return next();
 
-        ctx.reply('Set urgency or due date:', Markup.inlineKeyboard([
-            [Markup.button.callback('Now Now (Urgent)', 'URGENT')],
-            [Markup.button.callback('Completed By (Pick Date)', 'DATE')]
-        ]));
-        return;
-    }
+    // Handle input as the task description
 
-    // Case 2: Due date input
-    if (session.task && !session.dueDate && session.urgency !== 'urgent') {
-        session.dueDate = new Date(ctx.message.text);
-        session.urgency = 'scheduled';
+    session.task = ctx.message.text;
+    session.step = 'waiting_urgency'; // <--- Next step
 
-        showReviewOptions(ctx, session);
-    }
+    ctx.reply('Set urgency or due date:', Markup.inlineKeyboard([
+        [Markup.button.callback('Now Now (Urgent)', 'URGENT')],
+        [Markup.button.callback('Completed By (Pick Date)', 'DATE')]
+    ]));
 });
 
+
+
+
+bot.action('DATE', async (ctx) => {
+    const chatId = getChatId(ctx);
+    const session = taskSession[chatId];
+    if (!session || session.step !== 'waiting_urgency') {
+        clearSessions(chatId);
+        return ctx.reply("⚠️ Unexpected action. Please start from main menu.");
+    }
+    session.step = 'waiting_due_date';
+    ctx.reply("Please type the due date (YYYY-MM-DD):");
+});
+
+
+
+// HANDLE TEXT INPUT (DUE DATE)
+bot.on('text', async (ctx, next) => {
+    const chatId = getChatId(ctx);
+    const session = taskSession[chatId];
+    if (!session || session.step !== 'waiting_due_date') return next();
+
+    const input = ctx.message.text.trim();
+
+    // Validate YYYY-MM-DD format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input)) {
+        return ctx.reply("⚠️ *Invalid format.*\nPlease type the due date as YYYY-MM-DD (e.g. 2024-07-15).", { parse_mode: 'Markdown' });
+    }
+
+    const [year, month, day] = input.split('-').map(Number);
+    const date = new Date(year, month - 1, day);
+
+    // Validate date is real (not 2024-02-30 etc)
+    if (
+        isNaN(date.getTime()) ||
+        date.getFullYear() !== year ||
+        date.getMonth() !== month - 1 ||
+        date.getDate() !== day
+    ) {
+        return ctx.reply("⚠️ *Invalid date.* Please enter a real date as YYYY-MM-DD.", { parse_mode: 'Markdown' });
+    }
+
+    // Validate date is today or future
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Only compare date part
+    if (date < today) {
+        return ctx.reply("⚠️ *Date is in the past.* Please enter today or a future date.", { parse_mode: 'Markdown' });
+    }
+
+    // Valid date!
+    session.dueDate = date; // You may want to store the actual Date object
+    session.urgency = 'scheduled';
+    session.step = 'review_task';
+    showReviewOptions(ctx, session);
+});
+
+
+
 // URGENT SELECTED
+// When Boss chooses urgent
 bot.action('URGENT', (ctx) => {
     if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can perform this action.");
 
@@ -617,18 +713,14 @@ bot.action('URGENT', (ctx) => {
     const chatId = getChatId(ctx);
     const session = taskSession[chatId];
 
-    if (!session) return;
+    if (!session || session.step !== 'waiting_urgency') {
+        clearSessions(chatId);
+        return ctx.reply("⚠️ Unexpected action. Please start from main menu.");
+    }
     session.urgency = 'urgent';
     session.dueDate = null;
-
+    session.step = 'review_task';
     showReviewOptions(ctx, session);
-});
-
-// DATE SELECTED
-bot.action('DATE', (ctx) => {
-    if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can perform this action.");
-
-    ctx.reply('Please type the due date (YYYY-MM-DD):');
 });
 
 
@@ -656,8 +748,12 @@ bot.action('EDIT', (ctx) => {
     const chatId = getChatId(ctx);
     const session = taskSession[chatId];
 
-    if (!session) return;
+    if (!session || session.step !== 'review_task') {
+        clearSessions(chatId);
+        return ctx.reply("⚠️ Cannot edit right now. Please restart from main menu.");
+    }
     delete session.task;
+    session.step = 'waiting_task';
     ctx.reply('Please retype the task:');
 });
 
@@ -672,7 +768,10 @@ bot.action('SEND', async (ctx) => {
     const chatId = getChatId(ctx);
     const session = taskSession[chatId];
 
-    if (!session) return;
+    if (!session || session.step !== 'review_task' || !session.task) {
+        clearSessions(chatId);
+        return ctx.reply("❌ No task to send or not ready for sending. Please restart.");
+    }
 
     const newTask = await Task.create({
         task: session.task,
@@ -686,9 +785,23 @@ bot.action('SEND', async (ctx) => {
     // 🛎 Notify the doer on Telegram
     if (session.doerTelegramId) {
         try {
-            await bot.telegram.sendMessage(session.doerTelegramId,
+            const taskId = newTask.id;
+            await bot.telegram.sendMessage(
+                session.doerTelegramId,
                 `📥 *New Task Assigned*\n\n📄 ${session.task}\n⏱️ ${session.urgency}\n📅 ${session.dueDate ? session.dueDate.toDateString() : 'ASAP'}`,
-                { parse_mode: 'Markdown' }
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        inline_keyboard: [
+                            [
+                                { text: '🗓️ Request Extension', callback_data: `TASK_EXT_${taskId}` }
+                            ],
+                            [
+                                { text: '🚫 Request Cancellation', callback_data: `TASK_CANCEL_${taskId}` }
+                            ]
+                        ]
+                    }
+                }
             );
         } catch (err) {
             console.log("❌ Failed to notify doer:", err.message);
@@ -700,10 +813,12 @@ bot.action('SEND', async (ctx) => {
 
     // Notify EA for follow-up
     try {
-        await bot.telegram.sendMessage(ROLES.ea,
-            `🧾 *Follow-up Task Alert (EA)*\n\n👤 Doer: ${session.doerName}\n📄 Task: ${session.task}\n⏱️ ${session.urgency}\n📅 ${session.dueDate ? session.dueDate.toDateString() : 'ASAP'}`,
-            { parse_mode: 'Markdown' }
-        );
+        if (ROLES.ea !== session.doerTelegramId) {
+            await bot.telegram.sendMessage(ROLES.ea,
+                `🧾 *Follow-up Task Alert (EA)*\n\n👤 Doer: ${session.doerName}\n📄 Task: ${session.task}\n⏱️ ${session.urgency}\n📅 ${session.dueDate ? session.dueDate.toDateString() : 'ASAP'}`,
+                { parse_mode: 'Markdown' }
+            );
+        }
     } catch (err) {
         console.log("❌ Failed to notify EA:", err.message);
     }
@@ -715,11 +830,32 @@ bot.action('SEND', async (ctx) => {
 
 
 
+bot.action('STATUS', async (ctx) => {
+    const chatId = getChatId(ctx);
+    clearSessions(chatId);
+    if (![ROLES.ea, ROLES.boss].includes(chatId)) {
+        return ctx.reply("❌ You are not authorized to access this menu.");
+    }
+
+    ctx.reply("📋 Select the task status you want to view:", Markup.inlineKeyboard([
+        [Markup.button.callback('📌 Pending', 'STATUS_PENDING')],
+        [Markup.button.callback('✅ Completed', 'STATUS_COMPLETED')],
+        [Markup.button.callback('🔁 Revised', 'STATUS_REVISED')],
+        [Markup.button.callback('❌ Cancelled', 'STATUS_CANCELLED')]
+    ]));
+});
+
+
+
 //  Pending Tasks
 
 bot.action('STATUS_PENDING', async (ctx) => {
 
-    if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can perform this action.");
+    const chatId = getChatId(ctx);
+
+    if (![ROLES.ea, ROLES.boss].includes(chatId)) {
+        return ctx.reply("❌ You are not authorized to access this menu.");
+    }
 
     const tasks = await Task.findAll({
         where: { status: 'pending' },
@@ -737,7 +873,11 @@ bot.action('STATUS_PENDING', async (ctx) => {
 // 🟢 Completed Tasks
 bot.action('STATUS_COMPLETED', async (ctx) => {
 
-    if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can perform this action.");
+    const chatId = getChatId(ctx);
+
+    if (![ROLES.ea, ROLES.boss].includes(chatId)) {
+        return ctx.reply("❌ You are not authorized to access this menu.");
+    }
 
     const tasks = await Task.findAll({
         where: { status: 'completed' },
@@ -756,7 +896,11 @@ bot.action('STATUS_COMPLETED', async (ctx) => {
 // Revised Tasks (due date extended)
 bot.action('STATUS_REVISED', async (ctx) => {
 
-    if (!isBoss(ctx)) return ctx.reply("❌ Only the Boss can perform this action.");
+    const chatId = getChatId(ctx);
+
+    if (![ROLES.ea, ROLES.boss].includes(chatId)) {
+        return ctx.reply("❌ You are not authorized to access this menu.");
+    }
 
     const tasks = await Task.findAll({
         where: {
@@ -774,6 +918,105 @@ bot.action('STATUS_REVISED', async (ctx) => {
 
     ctx.reply(`🔁 *Revised Tasks:*\n\n${msg}`, { parse_mode: 'Markdown' });
 });
+
+
+bot.action('STATUS_CANCELLED', async (ctx) => {
+    const chatId = getChatId(ctx);
+
+    if (![ROLES.ea, ROLES.boss].includes(chatId)) {
+        return ctx.reply("❌ You are not authorized to access this menu.");
+    }
+
+    const tasks = await Task.findAll({
+        where: { status: 'canceled' },  // direct match
+        order: [['updatedAt', 'DESC']],
+        limit: 10
+    });
+
+    if (!tasks.length) return ctx.reply("❌ No cancelled tasks found.");
+
+    const msg = tasks.map(t =>
+        `👤 *Doer:* ${t.doer}\n📄 *Task:* ${t.task}\n📅 *Due Date:* ${t.dueDate ? new Date(t.dueDate).toDateString() : 'ASAP'}`
+    ).join('\n\n');
+
+    ctx.reply(`❌ *Cancelled Tasks:*\n\n${msg}`, { parse_mode: 'Markdown' });
+});
+
+
+
+// BROADCAST SESSION CODE
+
+
+bot.action('BROADCAST', async (ctx) => {
+    const chatId = getChatId(ctx);
+    clearSessions(chatId);
+    if (chatId !== ROLES.boss) {
+        return ctx.reply('❌ Only Boss can broadcast messages.');
+    }
+    broadcastSessions[chatId] = true;
+    await ctx.reply('📝 Please type the message you want to broadcast to all Doers:');
+});
+
+
+// When boss types the message:
+bot.on('text', async (ctx, next) => {
+    const chatId = getChatId(ctx);
+
+    // Only for broadcast mode
+    if (!broadcastSessions[chatId]) return next();
+
+    const message = ctx.message.text;
+    broadcastDraft[chatId] = message; // Save the draft
+
+    // Show confirmation buttons
+    await ctx.reply(
+        `📝 *Preview your message:*\n\n${message}\n\nSend to all doers?`,
+        {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Send', 'BROADCAST_SEND')],
+                [Markup.button.callback('❌ Cancel', 'BROADCAST_CANCEL')]
+            ])
+        }
+    );
+    // End broadcast mode, but wait for confirmation
+    broadcastSessions[chatId] = false;
+});
+
+
+bot.action('BROADCAST_SEND', async (ctx) => {
+    const chatId = getChatId(ctx);
+    const message = broadcastDraft[chatId];
+
+    if (ctx.chat.id !== ROLES.boss || !message) {
+        return ctx.reply('❌ No message to send.');
+    }
+
+    const doers = await Doer.findAll({ where: { telegramId: { [Op.not]: null } } });
+
+    for (const doer of doers) {
+        try {
+            await bot.telegram.sendMessage(
+                doer.telegramId,
+                `📢 *Message from Boss:*\n\n${message}`,
+                { parse_mode: 'Markdown' }
+            );
+        } catch (e) {
+            console.error(`❌ Failed to message doer ${doer.name}:`, e);
+        }
+    }
+
+    await ctx.reply('✅ Broadcast sent to all doers!');
+    clearSessions((chatId))
+});
+
+bot.action('BROADCAST_CANCEL', async (ctx) => {
+    const chatId = getChatId(ctx);
+
+    await ctx.reply('❌ Broadcast cancelled.');
+    clearSessions(chatId);
+});
+
 
 
 
