@@ -16,7 +16,25 @@ const Doer = sequelize.define('Doer', {
   isActive: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  department: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  // Approval flow fields
+  isApproved: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: true
+  },
+  approvalStatus: {
+    type: DataTypes.ENUM('PENDING', 'APPROVED', 'REJECTED'),
+    defaultValue: 'APPROVED'
+  },
+  approvedBy: {
+    type: DataTypes.STRING, // Stores approver's name (not telegramId)
+    allowNull: true
   }
+
 });
 
 module.exports = Doer;

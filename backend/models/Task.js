@@ -33,6 +33,10 @@ const Task = sequelize.define('Task', {
     extensionRequestedDate: {
         type: DataTypes.DATE,
         allowNull: true
+    },
+    department: {               // 👈 Optional, for filtering/reporting
+        type: DataTypes.STRING,
+        allowNull: true
     }
 
 });

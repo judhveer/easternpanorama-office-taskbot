@@ -1,53 +1,60 @@
 const sequelize = require('../config/db');
 const Doer = require('../models/Doer');
 
-const seedDoers = async () => {
+const nameToDepartment = {
+  "EVAMEDALYNE LANGSTANG": "Accounts",
+  "RAJESH KUMAR THAKUR": "Accounts",
+  "ANISHA LYNGDOH": "Admin",
+  "ALVIN KHARBAMON": "Admin",
+  "KIRAN DAS": "Admin",
+  "AIDAHUNLIN NALLE JYRWA": "CRM",
+  "FANNY": "CRM",
+  "DORIS": "Designer",
+  "MEWANKHRAW MAJAW": "Designer",
+  "SANJAY THAPA": "Designer",
+  "SICOVONTRITCHZ D THANGKHIEW": "Designer",
+  "TITU BHOWMICK": "Designer",
+  "WANHUNLANG KHARSATI": "Designer",
+  "MONICA LYNGDOH": "EA",
+  "MOHAMMED SERAJ ANSARI": "EA",
+  "ROSHAN": "EA",
+  "YUMNAM JACKSON SINGH": "Foundation",
+  "JENNIFER JYRWA": "HR",
+  "ANITA DORJEE": "MIS",
+  "EWAN HA I SHYLLA": "Office Assistant",
+  "BHAGYASHREE SINHA": "Process Coordinator",
+  "HIMANI": "Process Coordinator",
+  "SAFIRALIN": "Receptionist",
+  "BANTYNSHAIN LYNGDOH": "Sales dept",
+  "SHANLANG": "Tender Executive"
+};
+
+const seedDepartments = async () => {
   try {
     await sequelize.sync();
 
-    const names = [
-      "ANITA DORJEE",
-      "ANISHA LYNGDOH",
-      "ALVIN KHARBAMON",
-      "AIDAHUNLIN NALLE JYRWA",
-      "BANROILANG",
-      "BANSHANLANG",
-      "BANTYNSHAIN LYNGDOH",
-      "BHAGYASHREE SINHA",
-      "DORIS",
-      "EVAMEDALYNE LANGSTANG",
-      "FANNY",
-      "HIMANI",
-      "JENNIFER JYRWA",
-      "JOEY",
-      "KIRAN DAS",
-      "MONICA LYNGDOH",
-      "MOHAMMED SERAJ ANSARI",
-      "MEWANKHRAW MAJAW",
-      "RAJESH KUMAR THAKUR",
-      "SANJAY THAPA",
-      "SAFIRALIN",
-      "SALEEM",
-      "ROSHAN",
-      "SICOVONTRITCHZ D THANKHIEW",
-      "TITU BHOWMICK",
-      "WANHUNLANG KHARSATI",
-      "YUMNAM JACKSON SINGH",
-      "JUDHVEER"
-    ];
+    // Loop through each entry and update Doer
+    for (const [name, department] of Object.entries(nameToDepartment)) {
 
-    const doers = names.map(name => ({
-      name,
-      telegramId: null // You can update later when they register
-    }));
+      const [doer, created] = await Doer.findOrCreate({
+        where: { name },
+        defaults: { department }
+      });
 
-    await Doer.bulkCreate(doers, { ignoreDuplicates: true });
-    console.log('✅ All doers inserted successfully.');
+      if (!created) {
+        await doer.update({ department });
+        console.log(`✅ Updated ${name} to department: ${department}`);
+      } else {
+        console.log(`🆕 Created doer: ${name} with department: ${department}`);
+      }
+    }
+
+    console.log('🎉 Department update finished!');
     process.exit(0);
   } catch (error) {
-    console.error('❌ Error inserting doers:', error);
+    console.error('❌ Error updating departments:', error);
     process.exit(1);
   }
 };
 
-seedDoers();
+seedDepartments();
