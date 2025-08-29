@@ -12,7 +12,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 
 
 const ROLES = {
-    boss: 7724001439,         // ← replace with your Telegram ID
+    // boss: 7724001439,         // ← replace with your Telegram ID
     // boss: 778013761,   // sunny 
     // boss: 1096067043,   // harsh sir
     ea: 1359630106            // ← EA's Telegram ID
@@ -27,6 +27,13 @@ function isBoss(ctx) {
     const chatId = ctx.chat?.id || ctx.callbackQuery?.message?.chat?.id;
     return chatId === ROLES.boss;
 }
+
+async function isMIS(ctx) {
+    const telegramId = getChatId(ctx);
+    const me = await Doer.findOne({ where: { telegramId, isApproved: true } });
+    return !!me && me.department === 'MIS';
+}
+
 
 
 // ========== 2. Show Tasks by Status for Doers ==========
@@ -214,6 +221,13 @@ bot.action(/REG_SELECT_DEPT_UPDATE_(.+)/, async (ctx) => {
         const doer = await Doer.findByPk(reg.doerId);
         if (!doer) throw new Error("Doer not found.");
 
+
+        // store both the old and the requested new dept
+        doer.departmentPrev = doer.department || null;
+        doer.pendingDepartment = department;
+        doer.requestType = 'DEPT_CHANGE';
+        doer.requestedAt = new Date();
+
         // Mark as approval pending for department change
         doer.approvalStatus = 'PENDING';
         doer.isApproved = false;
@@ -258,10 +272,10 @@ bot.action(/REG_SELECT_DEPT_UPDATE_(.+)/, async (ctx) => {
 
 bot.action(/REG_APPROVE_DEPT_CHANGE_(\d+)_(.+)/, async (ctx) => {
     const doerId = ctx.match[1];
-    const newDepartment = ctx.match[2];
 
     try {
         const doer = await Doer.findByPk(doerId);
+        const newDepartment = doer.pendingDepartment || ctx.match[2];
         if (!doer) return ctx.reply("Doer not found.");
 
         // Guard: Prevent double-approval
@@ -274,6 +288,12 @@ bot.action(/REG_APPROVE_DEPT_CHANGE_(\d+)_(.+)/, async (ctx) => {
         doer.approvalStatus = 'APPROVED';
         const approvedBy = `${ctx.from.first_name} ${ctx.from.last_name || ''}`.trim();
         doer.approvedBy = approvedBy.toUpperCase();
+
+        doer.requestType = 'NONE';
+        doer.pendingDepartment = null;
+        doer.decisionAt = new Date();
+
+
         await doer.save();
 
         await bot.telegram.sendMessage(doer.telegramId, `✅ Your department change to *${newDepartment}* has been approved!`, {
@@ -310,6 +330,11 @@ bot.action(/REG_REJECT_DEPT_CHANGE_(\d+)/, async (ctx) => {
     doer.approvalStatus = 'REJECTED';
     const approvedBy = `${ctx.from.first_name} ${ctx.from.last_name || ''}`.trim();
     doer.approvedBy = approvedBy.toUpperCase();
+
+    doer.requestType = 'NONE';
+    doer.pendingDepartment = null;
+    doer.decisionAt = new Date();
+
     await doer.save();
 
     await bot.telegram.sendMessage(doer.telegramId, `❌ Your request to change department was rejected by MIS.`, { parse_mode: 'Markdown' });
@@ -375,7 +400,10 @@ bot.action(/REG_SELECT_DEPT_SELF_ADD_(.+)/, async (ctx) => {
             isActive: false,
             isApproved: false,
             approvalStatus: 'PENDING',
-            approvedBy: null
+            approvedBy: null,
+            requestType: 'REGISTRATION',
+            requestedAt: new Date()
+
         });
 
         ctx.reply(`📝 Your request to register as *${reg.pendingName}* in *${department}* department has been sent for approval. Please wait...`, { parse_mode: 'Markdown' });
@@ -412,7 +440,6 @@ bot.action(/REG_APPROVE_REQUEST_(\d+)/, async (ctx) => {
     const requesterId = ctx.match[1];
 
     const doer = await Doer.findOne({ where: { telegramId: requesterId } });
-    console.log("doer: ", doer);
     if (!doer) return ctx.reply("Doer not found.");
     // Guard: Prevent double approval
     if (doer.isApproved && doer.approvalStatus === 'APPROVED') {
@@ -426,6 +453,11 @@ bot.action(/REG_APPROVE_REQUEST_(\d+)/, async (ctx) => {
     doer.approvalStatus = 'APPROVED';
     const approvedBy = `${ctx.from.first_name} ${ctx.from.last_name || ''}`.trim();
     doer.approvedBy = approvedBy.toUpperCase();
+
+    doer.requestType = 'NONE';
+    doer.decisionAt = new Date();
+
+
     await doer.save();
 
     await bot.telegram.sendMessage(requesterId, `✅ Your registration has been approved! You can now use the bot.`, { parse_mode: 'Markdown' });
@@ -728,71 +760,234 @@ bot.on('text', async (ctx, next) => {
 
 
 // command for MIS
-// bot.command('pendingregistration', async (ctx) => {
-//     const chatId = getChatId(ctx);
+bot.command('misControl', async (ctx) => {
 
-//     // Allow only MIS department users
-//     const misUser = await Doer.findOne({
-//         where: {
-//             telegramId: chatId,
-//             department: 'MIS',
-//             isApproved: true
-//         }
-//     });
-//     if (!misUser) {
-//         return ctx.reply("❌ You are not authorized to view registration requests.");
-//     }
+    if (!(await isMIS(ctx)) && !isBoss(ctx)) {
+        return ctx.reply("❌ You are not authorized to access this menu, only MIS and BOSS can access it.");
+    }
 
-//     // All pending requests (registration or update)
-//     const pendingRegs = await Doer.findAll({
-//         where: { approvalStatus: 'PENDING' },
-//         order: [['createdAt', 'DESC']]
-//     });
-
-//     if (!pendingRegs.length) {
-//         return ctx.reply("✅ No pending registration or department change requests found.");
-//     }
-
-//     for (const doer of pendingRegs) {
-//         let text = '';
-//         let buttons = [];
-
-//         if (doer.isActive === false) {
-//             // New registration request
-//             text = `📝 *Pending Registration:*\n👤 Name: *${doer.name}*\n🏢 Department: *${doer.department || 'N/A'}*`;
-//             buttons = [
-//                 [Markup.button.callback('✅ Approve', `REG_APPROVE_REQUEST_${doer.telegramId}`)],
-//                 [Markup.button.callback('❌ Reject', `REG_REJECT_REQUEST_${doer.telegramId}`)]
-//             ];
-//         } else if (doer.isActive === true) {
-//             // Department update request
-//             // You should have a field for requested department, e.g., doer.pendingDepartment
-//             text = `🔄 *Department Change Request:*\n👤 Name: *${doer.name}*\nOld Dept: *${doer.department || 'N/A'}*`;
-//             // if (doer.pendingDepartment) {
-//             // text += `\nNew Dept: *${doer.pendingDepartment}*`;
-//             buttons = [
-//                 [Markup.button.callback('✅ Approve', `REG_APPROVE_DEPT_CHANGE_${doer.id}_${doer.pendingDepartment}`)],
-//                 [Markup.button.callback('❌ Reject', `REG_REJECT_DEPT_CHANGE_${doer.id}`)]
-//             ];
-//             // } else {
-//             //     text += `\n\n_New department not specified. Only rejection possible._`;
-//             //     buttons = [
-//             //         [Markup.button.callback('❌ Reject', `REG_REJECT_DEPT_CHANGE_${doer.id}`)]
-//             //     ];
-//             // }
-//         }
-
-//         // Log out what you are sending
-//         console.log('Sending text:', text, 'with buttons:', buttons);
-
-//         await ctx.reply(text, {
-//             parse_mode: 'Markdown',
-//             reply_markup: Markup.inlineKeyboard(buttons)
-//         });
+    ctx.reply(
+        `👤 *Available Commands for You:*\n` + "\n" +
+        `/pendingregistration - To See Pending Registrations and Department Change Requests\n` + "\n" +
+        `/remove - Remove an employee from a database\n` + "\n" +
+        `/help - Show this menu`,
+        { parse_mode: 'Markdown' }
+    );
+});
 
 
-//     }
-// });
+
+// /mis_requests → shows PENDING registrations and dept-change requests
+bot.command('pendingregistration', async (ctx) => {
+    if (!(await isMIS(ctx)) && !isBoss(ctx)) {
+        return ctx.reply('⛔ Only MIS (or Boss) can use this.');
+    }
+
+    // Fetch queues
+    const [regs, deps] = await Promise.all([
+        Doer.findAll({
+            where: { approvalStatus: 'PENDING', requestType: 'REGISTRATION' },
+            order: [['requestedAt', 'ASC']],
+            limit: 25
+        }),
+        Doer.findAll({
+            where: { approvalStatus: 'PENDING', requestType: 'DEPT_CHANGE' },
+            order: [['requestedAt', 'ASC']],
+            limit: 25
+        })
+    ]);
+
+    if (!regs.length && !deps.length) {
+        return ctx.reply('✅ No pending requests.');
+    }
+
+    // Render registrations
+    if (regs.length) {
+        await ctx.reply(`🗂️ *Pending Registrations* (${regs.length})`, { parse_mode: 'Markdown' });
+        for (const d of regs) {
+            await ctx.reply(
+                `👤 *${d.name}*\n🏢 Dept: *${d.department || '—'}*\n🆔 Telegram: \`${d.telegramId}\`\n🕒 Requested: ${d.requestedAt ? d.requestedAt.toDateString() : '—'}`,
+                {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.callback('✅ Approve', `REG_APPROVE_REQUEST_${d.telegramId}`)],
+                        [Markup.button.callback('❌ Reject', `REG_REJECT_REQUEST_${d.telegramId}`)]
+                    ])
+                }
+            );
+        }
+    }
+
+    // Render dept-change requests
+    if (deps.length) {
+        await ctx.reply(`🔁 *Pending Department Changes* (${deps.length})`, { parse_mode: 'Markdown' });
+        for (const d of deps) {
+            const oldDept = d.departmentPrev || d.department || '—';
+            const newDept = d.pendingDepartment || '—';
+            await ctx.reply(
+                `👤 *${d.name}*\n🧭 From: *${oldDept}* → To: *${newDept}*\n🆔 DoerID: ${d.id}\n🕒 Requested: ${d.requestedAt ? d.requestedAt.toDateString() : '—'}`,
+                {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        // reuse your existing handlers; pass id + newDept
+                        [Markup.button.callback('✅ Approve', `REG_APPROVE_DEPT_CHANGE_${d.id}_${newDept}`)],
+                        [Markup.button.callback('❌ Reject', `REG_REJECT_DEPT_CHANGE_${d.id}`)]
+                    ])
+                }
+            );
+        }
+    }
+});
+
+
+
+// 1) /remove_employee (alias /remove) → choose department
+bot.command(['remove_employee', 'remove'], async (ctx) => {
+    if (!(await isMIS(ctx)) && !isBoss(ctx)) {
+        return ctx.reply('⛔ Only MIS or Boss can remove employees.');
+    }
+    return showDepartmentOptions(ctx, 'Select the department to remove from:', 'RM_DEPT');
+});
+
+const PAGE_SIZE = 10;
+
+// 2) After department pick → list employees (paginated)
+async function listDeptEmployees(ctx, dept, page = 1) {
+    const offset = (page - 1) * PAGE_SIZE;
+
+    const { rows, count } = await Doer.findAndCountAll({
+        where: { department: dept },
+        order: [['name', 'ASC']],
+        limit: PAGE_SIZE,
+        offset
+    });
+
+    if (!count) {
+        return ctx.reply(`📭 No employees found in *${dept}*.`, { parse_mode: 'Markdown' });
+    }
+
+    const totalPages = Math.max(1, Math.ceil(count / PAGE_SIZE));
+    const enc = encodeURIComponent(dept);
+
+    const buttons = rows.map(d => [
+        Markup.button.callback(`👤 ${d.name} (#${d.id})`, `RM_PICK_${d.id}_${enc}_${page}`)
+    ]);
+
+    const nav = [];
+    if (page > 1) nav.push(Markup.button.callback('⬅️ Prev', `RM_PAGE_${enc}_${page - 1}`));
+    if (page < totalPages) nav.push(Markup.button.callback('Next ➡️', `RM_PAGE_${enc}_${page + 1}`));
+    if (nav.length) buttons.push(nav);
+
+    return ctx.reply(
+        `🗂️ *${dept}* — page ${page}/${totalPages}\nSelect an employee to remove:`,
+        { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) }
+    );
+}
+
+
+
+bot.action(/RM_DEPT_(.+)/, async (ctx) => {
+    if (!(await isMIS(ctx)) && !isBoss(ctx)) return ctx.answerCbQuery('Only MIS/Boss.');
+    await ctx.answerCbQuery();
+    const dept = decodeURIComponent(ctx.match[1]);
+    return listDeptEmployees(ctx, dept, 1);
+});
+
+
+bot.action(/RM_PAGE_(.+)_(\d+)/, async (ctx) => {
+    if (!(await isMIS(ctx)) && !isBoss(ctx)) return ctx.answerCbQuery('Only MIS/Boss.');
+    await ctx.answerCbQuery();
+    const dept = decodeURIComponent(ctx.match[1]);
+    const page = parseInt(ctx.match[2], 10) || 1;
+    // Send a fresh list message (keeps code simple; avoids edit edge cases)
+    return listDeptEmployees(ctx, dept, page);
+});
+
+// 3) Pick employee → show confirmation (with pending-task count)
+bot.action(/RM_PICK_(\d+)_([^_]+)_(\d+)/, async (ctx) => {
+    if (!(await isMIS(ctx)) && !isBoss(ctx)) return ctx.answerCbQuery('Only MIS/Boss.');
+    await ctx.answerCbQuery();
+
+    const doerId = parseInt(ctx.match[1], 10);
+    const dept = decodeURIComponent(ctx.match[2]);
+    const page = parseInt(ctx.match[3], 10) || 1;
+
+    const doer = await Doer.findByPk(doerId);
+    if (!doer) return ctx.reply('❌ Employee not found (maybe already removed).');
+
+    let pendingCount = 0;
+    try {
+        pendingCount = await Task.count({
+            where: { doer: doer.name, status: { [Op.in]: ['pending', 'revised'] } }
+        });
+    } catch { /* ignore */ }
+
+    const enc = encodeURIComponent(dept);
+    const text =
+        `⚠️ *Confirm removal*
+👤 *${doer.name}*
+🏢 Dept: *${doer.department || '—'}*
+📌 Pending tasks: *${pendingCount}*
+
+This action *permanently deletes* the employee. It cannot be undone.`;
+
+    return ctx.reply(text, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+            [Markup.button.callback('🗑️ Yes, remove permanently', `RM_CONFIRM_${doer.id}`)],
+            [
+                Markup.button.callback('⬅️ Back', `RM_PAGE_${enc}_${page}`),
+                Markup.button.callback('Cancel', 'RM_CANCEL')
+            ]
+        ])
+    });
+});
+
+// 4) Confirm removal → DM user (best effort), delete, acknowledge
+bot.action(/RM_CONFIRM_(\d+)/, async (ctx) => {
+    if (!(await isMIS(ctx)) && !isBoss(ctx)) return ctx.answerCbQuery('Only MIS/Boss.');
+    await ctx.answerCbQuery();
+
+    const doerId = parseInt(ctx.match[1], 10);
+    const doer = await Doer.findByPk(doerId);
+    if (!doer) return ctx.reply('❌ Employee not found (maybe already removed).');
+
+
+    // Try to notify the user; ignore failures (400/403/etc.)
+    try {
+        const chatId = String(doer.telegramId || '').trim();
+        if (/^-?\d{5,20}$/.test(chatId)) {
+            await ctx.telegram.sendMessage(
+                chatId,
+                '⚠️ You have been removed from the company database and can no longer use this bot.',
+                { parse_mode: 'Markdown' }
+            );
+        }
+    } catch (e) {
+        console.warn('DM before removal failed:', e?.response?.description || e.message);
+    }
+
+    // Permanently delete
+    await doer.destroy();
+
+    // Acknowledge
+    return ctx.reply(`🗑️ Removed *${doer.name}* permanently.`, { parse_mode: 'Markdown' });
+});
+
+// 5) Cancel action
+bot.action('RM_CANCEL', async (ctx) => {
+    await ctx.answerCbQuery('Cancelled');
+    return ctx.reply('❎ Action cancelled.');
+});
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1126,7 +1321,6 @@ bot.action(/DOER_(\d+)/, async (ctx) => {
     }
 
     const doerId = parseInt(ctx.match[1]);
-    // console.log("doerId:", doerId);
     const doer = await Doer.findByPk(doerId);
 
     if (!doer) return ctx.reply("❌ Doer not found.");
@@ -1682,8 +1876,8 @@ function showDoerHelp(ctx) {
         `👤 *Available Commands for You:*\n` + "\n" +
         `/register - Register yourself, update department or change department\n` + "\n" +
         `/tasks - View your tasks\n` + "\n" +
-        `/pendingregistration - only MIS can view the pending registrations\n` + "\n" +
-        `/heybot - for EA to follow up\n` + "\n" +
+        `/misControl - Only MIS or Boss can access it.\n` + "\n" +
+        `/heybot - For EA to follow up\n` + "\n" +
         `/help - Show this menu`,
         { parse_mode: 'Markdown' }
     );
@@ -1694,6 +1888,7 @@ function showBossHelp(ctx) {
         `👑 *Boss Commands:*\n` + "\n" +
         `/start - Open main menu\n` + "\n" +
         `/heybot - Access EA control panel\n` + "\n" +
+        `/misControl - Access MIS commands\n` + "\n" +
         `/help - Show this menu`,
         { parse_mode: 'Markdown' }
     );

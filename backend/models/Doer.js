@@ -33,6 +33,35 @@ const Doer = sequelize.define('Doer', {
   approvedBy: {
     type: DataTypes.STRING, // Stores approver's name (not telegramId)
     allowNull: true
+  },
+
+  
+  // NEW — minimal state to support MIS queue/history
+  requestType: {
+    // Distinguish registration vs dept-change (so MIS can filter both)
+    type: DataTypes.ENUM('NONE', 'REGISTRATION', 'DEPT_CHANGE'),
+    allowNull: false,
+    defaultValue: 'NONE'
+  },
+  pendingDepartment: {
+    // For dept-change: store the requested NEW dept (so callbacks are not the only source)
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  departmentPrev: {
+    // Remember the PREVIOUS (last approved) department for audit/MIS display
+    type: DataTypes.STRING,
+    allowNull: true
+  },
+  requestedAt: {
+    // When the current approval request started
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  decisionAt: {
+    // When MIS approved/rejected
+    type: DataTypes.DATE,
+    allowNull: true
   }
 
 });
